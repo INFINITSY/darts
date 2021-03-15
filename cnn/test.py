@@ -2,6 +2,7 @@ import os
 import sys
 import glob
 import numpy as np
+import pandas as pd
 import torch
 import utils
 import logging
@@ -14,6 +15,7 @@ import torch.backends.cudnn as cudnn
 
 from torch.autograd import Variable
 from model import NetworkCIFAR as Network
+from metrics import Metrics
 
 
 parser = argparse.ArgumentParser("cifar")
@@ -40,11 +42,12 @@ CIFAR_CLASSES = 10
 
 
 def main():
-  if not torch.cuda.is_available():
-    logging.info('no gpu device available')
-    sys.exit(1)
+  #if not torch.cuda.is_available():
+  #  logging.info('no gpu device available')
+  #  sys.exit(1)
 
   np.random.seed(args.seed)
+  '''
   torch.cuda.set_device(args.gpu)
   cudnn.benchmark = True
   torch.manual_seed(args.seed)
@@ -53,15 +56,25 @@ def main():
   logging.info('gpu device = %d' % args.gpu)
   logging.info("args = %s", args)
 
+  '''
+  device = torch.device("cpu")
+  torch.manual_seed(args.seed)
+  logging.info('use cpu')
+  logging.info("args = %s", args)
+
   genotype = eval("genotypes.%s" % args.arch)
   model = Network(args.init_channels, CIFAR_CLASSES, args.layers, args.auxiliary, genotype)
-  model = model.cuda()
+  param_list = list(model.parameters())
+  # print(model)
+  # model = model.cuda()
+  model.to(device)
   utils.load(model, args.model_path)
 
   logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
   criterion = nn.CrossEntropyLoss()
-  criterion = criterion.cuda()
+  #criterion = criterion.cuda()
+  criterion.to(device)
 
   _, test_transform = utils._data_transforms_cifar10(args)
   test_data = dset.CIFAR10(root=args.data, train=False, download=True, transform=test_transform)
@@ -70,28 +83,59 @@ def main():
       test_data, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=2)
 
   model.drop_path_prob = args.drop_path_prob
+
+  METRICS = Metrics(list(model.parameters()), p=1)
+  PERFORMANCE_STATISTICS = {}
+  ARCH_STATISTICS = {}
+  metrics_path = './metrics_stat_test.xlsx'
+  weights_path = './weights_stat_test.xlsx'
+
+  epoch = 0
+  io_metrics = METRICS.evaluate(epoch)
+  PERFORMANCE_STATISTICS[f'in_S_epoch_{epoch}'] = io_metrics.input_channel_S
+  PERFORMANCE_STATISTICS[f'out_S_epoch_{epoch}'] = io_metrics.output_channel_S
+  PERFORMANCE_STATISTICS[f'mode12_S_epoch_{epoch}'] = io_metrics.mode_12_channel_S
+  PERFORMANCE_STATISTICS[f'fc_S_epoch_{epoch}'] = io_metrics.fc_S
+  PERFORMANCE_STATISTICS[f'in_rank_epoch_{epoch}'] = io_metrics.input_channel_rank
+  PERFORMANCE_STATISTICS[f'out_rank_epoch_{epoch}'] = io_metrics.output_channel_rank
+  PERFORMANCE_STATISTICS[f'mode12_rank_epoch_{epoch}'] = io_metrics.mode_12_channel_rank
+  PERFORMANCE_STATISTICS[f'fc_rank_epoch_{epoch}'] = io_metrics.fc_rank
+  PERFORMANCE_STATISTICS[f'in_condition_epoch_{epoch}'] = io_metrics.input_channel_condition
+  PERFORMANCE_STATISTICS[f'out_condition_epoch_{epoch}'] = io_metrics.output_channel_condition
+  PERFORMANCE_STATISTICS[f'mode12_condition_epoch_{epoch}'] = io_metrics.mode_12_channel_condition
+  # write metrics data to xls file
+  metrics_df = pd.DataFrame(data=PERFORMANCE_STATISTICS)
+  metrics_df.to_excel(metrics_path)
+
   test_acc, test_obj = infer(test_queue, model, criterion)
   logging.info('test_acc %f', test_acc)
 
 
 def infer(test_queue, model, criterion):
+  device = torch.device("cpu")
   objs = utils.AvgrageMeter()
   top1 = utils.AvgrageMeter()
   top5 = utils.AvgrageMeter()
   model.eval()
 
   for step, (input, target) in enumerate(test_queue):
-    input = Variable(input, volatile=True).cuda()
-    target = Variable(target, volatile=True).cuda(async=True)
+    #input = Variable(input, volatile=True).cuda()
+    logging.info('test %03d start', step)
+    with torch.no_grad():
+      input = Variable(input).to(device)
+      #target = Variable(target, volatile=True).cuda(async=True)
+      target = Variable(target).to(device)
 
+    logging.info('test %03d infer', step)
     logits, _ = model(input)
     loss = criterion(logits, target)
 
+    logging.info('test %03d acc', step)
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
     n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    objs.update(loss.item(), n)
+    top1.update(prec1.item(), n)
+    top5.update(prec5.item(), n)
 
     if step % args.report_freq == 0:
       logging.info('test %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
